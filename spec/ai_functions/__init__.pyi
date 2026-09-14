@@ -29,12 +29,15 @@ from .serve import aserve, serve
 from .session import FileSessionStore, SessionData, SessionStore
 from .types import ParameterView, Result, Traceable
 from .utils import run_blocking
+from .verified_compile import AIVerifiedFunction, LeanSpec, VerifiedCompileConfig, ai_verified_compile
 
 __all__ = [
     "AgentCoreMemoryBackend",
     "ai_function",
+    "ai_verified_compile",
     "AIFunction",
     "AIThread",
+    "AIVerifiedFunction",
     "aserve",
     "build_graph",
     "build_graph_from_result",
@@ -48,6 +51,7 @@ __all__ = [
     "InMemoryCoordinator",
     "JSONMemoryBackend",
     "LocalWorker",
+    "LeanSpec",
     "MemoryBackend",
     "NoCoordinatorError",
     "ParameterView",
@@ -66,5 +70,6 @@ __all__ = [
     "Thread",
     "ThreadHandle",
     "Traceable",
+    "VerifiedCompileConfig",
     "WorkerAdapter",
 ]

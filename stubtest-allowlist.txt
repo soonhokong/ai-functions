@@ -3,6 +3,7 @@ ai_functions.ai_thread.ai_function.AIFunction.__type_params__
 ai_functions.ai_thread.ai_function._TypedDecorator.__type_params__
 ai_functions.ai_thread.ai_thread.AIThread.__type_params__
 ai_functions.ai_thread.ai_thread.OutputSpec.__type_params__
+ai_functions.verified_compile._decorator.AIVerifiedFunction.__type_params__
 ai_functions.handle.ThreadHandle.__type_params__
 ai_functions.runtime.worker.PromptRequest.__type_params__
 ai_functions.protocols.Spawnable.__type_params__
