@@ -33,6 +33,7 @@
 Strands AI Functions is a Python library built around a new abstraction: functions that behave like standard Python functions, but are evaluated by AI agents. The library develops this idea from a single verified call up to distributed teams of agents that improve run over run:
 
 - **Don't prompt-and-pray** — Declare *post-conditions* on a function and the library runs a self-correcting loop until the output satisfies them, preventing cascading errors in complex workflows.
+- **Lean-verified native code** — `@ai_verified_compile` generates an implementation and proof, checks both with Lean, then compiles the exact verified implementation to a native library.
 - **Native Python objects** — Agents can dynamically generate and execute code, so an AI Function can take and return real Python values (a `DataFrame`, not a JSON blob).
 - **Just functions** — Run them in parallel with `asyncio.gather`, pass them to other agents as tools, and share them as ordinary Python libraries.
 - **Stateful threads and teams** — Spawn a function into a live **AI Thread** that keeps its history; run several threads on a coordinator and let them discover and message each other.
@@ -131,6 +132,31 @@ summary = await summarize_meeting(transcripts)  # a validated MeetingSummary ins
 ```
 
 Each direct call is a one-shot: it runs on a fresh, private thread and keeps no history between calls (for state, see [Stateful AI Threads](#stateful-ai-threads) below).
+
+## Lean-Verified Native Compilation
+
+`@ai_verified_compile` turns a typed Python function stub into native code whose behavior satisfies a Lean proposition. The recommended form fixes the user-reviewed specification before the model starts proof search:
+
+```python
+from ai_functions import LeanSpec, VerifiedCompileConfig, ai_verified_compile
+
+
+@ai_verified_compile(
+    lean_spec=LeanSpec(
+        proposition="result = values.foldl (fun total value => total + value) 0",
+    ),
+    config=VerifiedCompileConfig(mathlib_revision=None),
+)
+def sum_values(values: list[int]) -> int:
+    """Return the sum of values."""
+
+
+print(sum_values([3, -2, 10]))  # 11
+```
+
+Lean errors, code-generation failures, and native-link failures are fed back through the normal AI Functions retry loop. The accepted implementation is compiled to C and imported by the proof as the exact `.olean` produced during that same compilation pass. The model is therefore outside the trust boundary; the reviewed Lean specification, Lean kernel and compiler, generated FFI shim, and native C toolchain remain in it.
+
+This feature currently supports macOS and Linux, with `int`, `bool`, `float`, and `list[int]` inputs and scalar `int`, `bool`, or `float` results. It requires an [elan](https://lean-lang.org/lean4/doc/setup.html)-managed Lean installation and a native C compiler. See [Lean-verified compilation](docs/verified_compile.md) for the trust model, Python-post-condition mode, artifacts, and configuration.
 
 ## Native Python Objects
 
