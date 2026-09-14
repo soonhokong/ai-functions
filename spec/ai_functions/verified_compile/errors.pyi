@@ -6,6 +6,12 @@ class VerifiedCompileError(RuntimeError):
 class VerifiedCompileConfigurationError(VerifiedCompileError):
     """The decorated function or compiler configuration is unsupported."""
 
+class PythonContractError(VerifiedCompileConfigurationError):
+    """A Python contract uses syntax or semantics outside the verified subset."""
+
+class PythonContractViolation(VerifiedCompileError):
+    """The native result failed its original Python contract at runtime."""
+
 class LeanSetupError(VerifiedCompileError):
     """Lean or its Lake environment could not be prepared."""
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import textwrap
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import Any
 
 from ..ai_thread import ai_function
@@ -57,17 +57,16 @@ def build_generation_prompt(
     func: Callable[..., Any],
     *,
     shape: FunctionShape,
-    post_conditions: Sequence[Callable[..., Any]],
-    lean_spec: LeanSpec | None,
+    lean_spec: LeanSpec,
 ) -> str:
     """Build the single synthesis prompt used by the retrying AI Function."""
     function_source = _callable_source(func, f"function {shape.python_name!r}")
     implementation_name = _model_implementation_name(shape)
     signature = f"{implementation_name} {shape.lean_parameters} : {shape.return_lean_type}".replace("  ", " ")
 
-    if lean_spec is not None:
-        task = f"""\
-The user supplied and reviewed this exact Lean specification:
+    task = f"""\
+The following exact Lean specification was fixed before this model invocation. It was
+either supplied directly or translated deterministically from a reviewed Python contract:
 
 ```lean
 {_theorem_preview(shape, lean_spec)}
@@ -84,38 +83,6 @@ def {signature} := ...
 -- END AI_FUNCTIONS_PROOF
 
 Do not restate or modify the specification.
-"""
-    else:
-        rendered_conditions = "\n\n".join(
-            f"Python post-condition {index + 1}:\n```python\n"
-            f"{_callable_source(condition, getattr(condition, '__name__', 'post_condition'))}\n```"
-            for index, condition in enumerate(post_conditions)
-        )
-        task = f"""\
-Formalize every Python post-condition below as one Lean proposition. The proposition may
-refer to `result` and to the Lean parameter names. Put helper definitions used by that
-proposition in AI_FUNCTIONS_SPECIFICATION, and put only the proposition expression in
-AI_FUNCTIONS_POSTCONDITION. Leave AI_FUNCTIONS_SPECIFICATION empty when no helpers are needed.
-
-{rendered_conditions}
-
-Return exactly these sections:
-
--- BEGIN AI_FUNCTIONS_IMPLEMENTATION
-def {signature} := ...
--- END AI_FUNCTIONS_IMPLEMENTATION
-
--- BEGIN AI_FUNCTIONS_SPECIFICATION
-...Lean definitions that formalize the Python checks...
--- END AI_FUNCTIONS_SPECIFICATION
-
--- BEGIN AI_FUNCTIONS_POSTCONDITION
-...one Prop expression using result and the parameters...
--- END AI_FUNCTIONS_POSTCONDITION
-
--- BEGIN AI_FUNCTIONS_PROOF
-...commands inside the generated theorem's `by`; omit the outer `by`...
--- END AI_FUNCTIONS_PROOF
 """
 
     return f"""\
@@ -139,8 +106,7 @@ def generate_source(
     func: Callable[..., Any],
     *,
     shape: FunctionShape,
-    post_conditions: Sequence[Callable[..., Any]],
-    lean_spec: LeanSpec | None,
+    lean_spec: LeanSpec,
     config: VerifiedCompileConfig,
     validate: Callable[[str], RenderedLeanSource],
 ) -> RenderedLeanSource:
@@ -148,7 +114,6 @@ def generate_source(
     prompt = build_generation_prompt(
         func,
         shape=shape,
-        post_conditions=post_conditions,
         lean_spec=lean_spec,
     )
     accepted: dict[str, RenderedLeanSource] = {}
@@ -178,6 +143,6 @@ def generate_source(
     return validate(response)
 
 
-def parse_generated_response(response: str, *, lean_spec: LeanSpec | None) -> LeanCandidate:
+def parse_generated_response(response: str) -> LeanCandidate:
     """Small indirection used by tests and the pipeline."""
-    return parse_candidate(response, model_generates_spec=lean_spec is None)
+    return parse_candidate(response, model_generates_spec=False)

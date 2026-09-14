@@ -6,6 +6,7 @@ import dataclasses
 import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -33,6 +34,21 @@ def _response(implementation: str, proof: str = "rfl") -> str:
 """
 
 
+def _cache_dir(tmp_path: Path) -> Path:
+    configured = os.environ.get("AI_FUNCTIONS_VERIFIED_COMPILE_TEST_CACHE")
+    return Path(configured) if configured else tmp_path / "cache"
+
+
+def _base_config(tmp_path: Path, *, max_attempts: int = 1) -> VerifiedCompileConfig:
+    return VerifiedCompileConfig(
+        cache_dir=_cache_dir(tmp_path),
+        toolchain_mode=os.environ.get("AI_FUNCTIONS_LEAN_TOOLCHAIN_MODE", "system"),
+        lean_toolchain=os.environ.get("AI_FUNCTIONS_LEAN_TOOLCHAIN", "leanprover/lean4:v4.33.1"),
+        mathlib_revision=None,
+        max_attempts=max_attempts,
+    )
+
+
 def _compile_scripted(
     func: Callable[..., Any],
     *,
@@ -55,12 +71,7 @@ def test_array_int_compiles_and_runs_on_host_platform(tmp_path) -> None:  # noqa
         raise AssertionError
 
     lean_spec = LeanSpec(proposition="result = values.foldl (fun total value => total + value) 0")
-    base_config = VerifiedCompileConfig(
-        cache_dir=tmp_path / "cache",
-        lean_toolchain=os.environ.get("AI_FUNCTIONS_LEAN_TOOLCHAIN", "leanprover/lean4:v4.33.1"),
-        mathlib_revision=None,
-        max_attempts=1,
-    )
+    base_config = _base_config(tmp_path)
     operation = "values.foldl (fun total value => total + value) 0"
     bad_response = _response(
         "def aiFunctionsImplementation (values : Array Int) : Int := 0",
@@ -114,12 +125,7 @@ def test_array_int_compiles_and_runs_on_host_platform(tmp_path) -> None:  # noqa
 
 
 def test_scalar_abis_compile_and_run_in_one_process(tmp_path) -> None:  # noqa: ANN001
-    base_config = VerifiedCompileConfig(
-        cache_dir=tmp_path / "cache",
-        lean_toolchain=os.environ.get("AI_FUNCTIONS_LEAN_TOOLCHAIN", "leanprover/lean4:v4.33.1"),
-        mathlib_revision=None,
-        max_attempts=1,
-    )
+    base_config = _base_config(tmp_path)
 
     def answer() -> int:
         """Return the answer."""
@@ -171,3 +177,34 @@ def aiFunctionsImplementation (value : Int) (enabled : Bool) : Bool :=
     assert answer_model.remaining_turns == 0
     assert positive_model.remaining_turns == 0
     assert double_model.remaining_turns == 0
+
+
+def all_nonnegative_contract(result: bool, values: list[int]) -> bool:
+    """The compiled result agrees with Python's universal predicate."""
+    return result == all(value >= 0 for value in values)
+
+
+def test_python_contract_is_translated_proved_and_compiled(tmp_path: Path) -> None:
+    def all_nonnegative(values: list[int]) -> bool:
+        """Return whether every input is nonnegative."""
+        raise AssertionError
+
+    response = _response(
+        """\
+def aiFunctionsImplementation (values : Array Int) : Bool :=
+  values.all (fun value => decide (value >= 0))""",
+    )
+    model = ScriptedModel([Turn(text=response)])
+    compiled = ai_verified_compile(
+        all_nonnegative,
+        post_condition=all_nonnegative_contract,
+        config=dataclasses.replace(_base_config(tmp_path), model=model),
+    )
+
+    assert compiled.lean_spec.proposition == ("(result = (values).all (fun value => decide (value >= 0)))")
+    assert compiled([]) is True
+    assert compiled([0, 4, 10]) is True
+    assert compiled([0, -1, 10]) is False
+    assert compiled.lean_spec.proposition in compiled.lean_source
+    assert "AI_FUNCTIONS_POSTCONDITION" not in compiled.lean_source
+    assert model.remaining_turns == 0

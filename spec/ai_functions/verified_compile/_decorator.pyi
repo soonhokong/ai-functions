@@ -27,6 +27,11 @@ class AIVerifiedFunction[**P, T]:
         ...
 
     @property
+    def lean_spec(self) -> LeanSpec:
+        """The fixed Lean contract, deterministically generated from Python when requested."""
+        ...
+
+    @property
     def artifact_dir(self) -> Path:
         """Directory containing the checked Lean, generated C, and library."""
         ...

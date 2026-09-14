@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Unpack, overload
 
+from ._contracts import translate_post_conditions
 from ._ffi import load_compiled_function
 from ._generation import generate_source, parse_generated_response
 from ._lean import LeanProject, shared_library_suffix
@@ -22,9 +23,9 @@ from ._locking import exclusive_file_lock
 from ._source import LeanSpec, RenderedLeanSource, render_sources, validate_lean_spec_names
 from ._types import FunctionShape, inspect_function
 from .config import VerifiedCompileConfig, VerifiedCompileKwargs
-from .errors import VerifiedCompileConfigurationError
+from .errors import PythonContractViolation, VerifiedCompileConfigurationError
 
-_CACHE_FORMAT = "ai-functions-verified-compile-v1"
+_CACHE_FORMAT = "ai-functions-verified-compile-v2"
 
 
 def _source_text(callable_: Callable[..., Any]) -> str:
@@ -142,12 +143,13 @@ def _cache_key(
         shape.return_lean_type,
         config.lean_toolchain,
         config.mathlib_revision or "",
+        config.toolchain_mode,
         sys.platform,
         platform.machine(),
     ]
     if lean_spec is not None:
         parts.extend((lean_spec.prelude, lean_spec.proposition))
-    else:
+    if post_conditions:
         parts.extend(_callable_fingerprint(condition) for condition in post_conditions)
     for part in parts:
         digest.update(part.encode())
@@ -215,7 +217,7 @@ def _compile_artifact(
     *,
     shape: FunctionShape,
     post_conditions: tuple[Callable[..., Any], ...],
-    lean_spec: LeanSpec | None,
+    lean_spec: LeanSpec,
     config: VerifiedCompileConfig,
 ) -> _CompiledArtifact:
     key = _cache_key(
@@ -243,7 +245,7 @@ def _compile_artifact(
         compiled_library: dict[str, Path] = {}
 
         def validate(response: str) -> RenderedLeanSource:
-            candidate = parse_generated_response(response, lean_spec=lean_spec)
+            candidate = parse_generated_response(response)
             rendered = render_sources(
                 candidate,
                 shape=shape,
@@ -262,7 +264,6 @@ def _compile_artifact(
         rendered = generate_source(
             func,
             shape=shape,
-            post_conditions=post_conditions,
             lean_spec=lean_spec,
             config=config,
             validate=validate,
@@ -276,7 +277,10 @@ def _compile_artifact(
             "theorem": rendered.theorem_name,
             "export": rendered.export_name,
             "lean_toolchain": config.lean_toolchain,
+            "toolchain_mode": config.toolchain_mode,
             "mathlib_revision": config.mathlib_revision,
+            "specification_origin": "python-contract" if post_conditions else "lean-spec",
+            "lean_proposition": lean_spec.proposition,
             "platform": sys.platform,
             "machine": platform.machine(),
         }
@@ -311,15 +315,14 @@ class AIVerifiedFunction[**P, T]:
         self._func = func
         self._shape = inspect_function(func)
         self._post_conditions = post_conditions
-        self._lean_spec = lean_spec
+        self._lean_spec = lean_spec or translate_post_conditions(post_conditions, shape=self._shape)
         self._config = config
         self._lock = threading.Lock()
         self._compiled: Callable[..., object] | None = None
         self._artifact: _CompiledArtifact | None = None
         functools.update_wrapper(self, func)
 
-        if lean_spec is not None:
-            validate_lean_spec_names(lean_spec, self._shape)
+        validate_lean_spec_names(self._lean_spec, self._shape)
         if config.compile_on == "import_time":
             self.compile()
 
@@ -327,6 +330,11 @@ class AIVerifiedFunction[**P, T]:
     def config(self) -> VerifiedCompileConfig:
         """The immutable compiler configuration."""
         return self._config
+
+    @property
+    def lean_spec(self) -> LeanSpec:
+        """The fixed Lean contract, deterministically generated from Python when requested."""
+        return self._lean_spec
 
     @property
     def artifact_dir(self) -> Path:
@@ -426,7 +434,38 @@ class AIVerifiedFunction[**P, T]:
         bound = self._shape.signature.bind(*args, **kwargs)
         bound.apply_defaults()
         values = [bound.arguments[parameter.python_name] for parameter in self._shape.parameters]
-        return self._compiled(*values)  # type: ignore[return-value]
+        result = self._compiled(*values)
+        self._check_python_contracts(result, bound.arguments)
+        return result  # type: ignore[return-value]
+
+    def _check_python_contracts(self, result: object, bound_arguments: dict[str, object]) -> None:
+        """Re-run reviewed Python contracts as a translation/FFI backstop."""
+        for condition in self._post_conditions:
+            signature = inspect.signature(condition)
+            positional: list[object] = [result]
+            keyword: dict[str, object] = {}
+            for index, parameter in enumerate(signature.parameters.values()):
+                if index == 0:
+                    continue
+                value = bound_arguments[parameter.name]
+                if parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+                    keyword[parameter.name] = value
+                else:
+                    positional.append(value)
+            try:
+                outcome = condition(*positional, **keyword)
+            except Exception as exc:
+                raise PythonContractViolation(
+                    f"Compiled result raised in Python contract {condition.__qualname__!r}: {exc}",
+                ) from exc
+            if type(outcome) is not bool:
+                raise PythonContractViolation(
+                    f"Python contract {condition.__qualname__!r} returned {type(outcome).__name__}, expected bool",
+                )
+            if not outcome:
+                raise PythonContractViolation(
+                    f"Compiled result violated Python contract {condition.__qualname__!r}",
+                )
 
 
 @overload
@@ -465,8 +504,8 @@ def ai_verified_compile[**P, T](
     """Compile an AI Function to Lean, prove its post-condition, and call it via FFI.
 
     Exactly one of ``post_condition`` and ``lean_spec`` is required. A Python
-    post-condition is convenient but leaves its Lean formalization model-generated;
-    a ``LeanSpec`` fixes the reviewed theorem before proof search begins.
+    post-condition is translated deterministically into a fixed Lean theorem
+    before model-driven implementation and proof search begins.
     """
     post_conditions = _normalize_post_conditions(post_condition)
     if bool(post_conditions) == (lean_spec is not None):

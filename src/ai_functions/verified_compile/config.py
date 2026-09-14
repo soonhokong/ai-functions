@@ -23,6 +23,7 @@ class VerifiedCompileKwargs(TypedDict, total=False):
     max_attempts: int
     cache_dir: str | Path
     compile_on: Literal["first_call", "import_time"]
+    toolchain_mode: Literal["managed", "system"]
     lean_toolchain: str
     mathlib_revision: str | None
     setup_timeout_seconds: float
@@ -42,8 +43,9 @@ class VerifiedCompileConfig:
     max_attempts: int = 5
     cache_dir: str | Path = field(default_factory=_default_cache_dir)
     compile_on: Literal["first_call", "import_time"] = "first_call"
+    toolchain_mode: Literal["managed", "system"] = "managed"
     lean_toolchain: str = "leanprover/lean4:v4.33.1"
-    mathlib_revision: str | None = "v4.33.1"
+    mathlib_revision: str | None = None
     setup_timeout_seconds: float = 900
     command_timeout_seconds: float = 180
 
@@ -53,6 +55,8 @@ class VerifiedCompileConfig:
             raise ValueError("max_attempts must be at least 1")
         if self.compile_on not in ("first_call", "import_time"):
             raise ValueError("compile_on must be 'first_call' or 'import_time'")
+        if self.toolchain_mode not in ("managed", "system"):
+            raise ValueError("toolchain_mode must be 'managed' or 'system'")
         if not self.lean_toolchain.strip():
             raise ValueError("lean_toolchain must not be empty")
         if self.setup_timeout_seconds <= 0:

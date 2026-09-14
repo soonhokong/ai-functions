@@ -373,16 +373,16 @@ def test_integer_ffi_rejects_bool_values() -> None:
         _array_int64([1, True])
 
 
-def test_python_post_condition_prompt_requests_formalization() -> None:
+def test_python_post_condition_is_fixed_before_generation_prompt() -> None:
     prompt = build_generation_prompt(
         increment,
         shape=inspect_function(increment),
-        post_conditions=(_post_condition,),
-        lean_spec=None,
+        lean_spec=LeanSpec(proposition="result = x + 1"),
     )
-    assert "AI_FUNCTIONS_SPECIFICATION" in prompt
-    assert "AI_FUNCTIONS_POSTCONDITION" in prompt
-    assert "return result == x + 1" in prompt
+    assert "result = x + 1" in prompt
+    assert "AI_FUNCTIONS_SPECIFICATION" not in prompt
+    assert "AI_FUNCTIONS_POSTCONDITION" not in prompt
+    assert "return result == x + 1" not in prompt
     assert "def aiFunctionsImplementation (x : Int) : Int := ..." in prompt
     assert "@[export" not in prompt
 
@@ -412,7 +412,6 @@ def test_generation_retries_with_lean_feedback() -> None:
     result = generate_source(
         increment,
         shape=inspect_function(increment),
-        post_conditions=(),
         lean_spec=LeanSpec(proposition="result = x + 1"),
         config=config,
         validate=validate,

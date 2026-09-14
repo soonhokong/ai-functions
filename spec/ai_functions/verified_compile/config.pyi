@@ -14,6 +14,7 @@ class VerifiedCompileKwargs(TypedDict, total=False):
     max_attempts: int
     cache_dir: str | Path
     compile_on: Literal["first_call", "import_time"]
+    toolchain_mode: Literal["managed", "system"]
     lean_toolchain: str
     mathlib_revision: str | None
     setup_timeout_seconds: float
@@ -27,8 +28,9 @@ class VerifiedCompileConfig:
     max_attempts: int = 5
     cache_dir: str | Path = ...
     compile_on: Literal["first_call", "import_time"] = "first_call"
+    toolchain_mode: Literal["managed", "system"] = "managed"
     lean_toolchain: str = "leanprover/lean4:v4.33.1"
-    mathlib_revision: str | None = "v4.33.1"
+    mathlib_revision: str | None = None
     setup_timeout_seconds: float = 900
     command_timeout_seconds: float = 180
 

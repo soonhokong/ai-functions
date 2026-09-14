@@ -135,28 +135,37 @@ Each direct call is a one-shot: it runs on a fresh, private thread and keeps no 
 
 ## Lean-Verified Native Compilation
 
-`@ai_verified_compile` turns a typed Python function stub into native code whose behavior satisfies a Lean proposition. The recommended form fixes the user-reviewed specification before the model starts proof search:
+`@ai_verified_compile` turns a typed Python function stub into native code whose
+behavior satisfies a deterministically translated Python contract:
 
 ```python
-from ai_functions import LeanSpec, VerifiedCompileConfig, ai_verified_compile
+from ai_functions import ai_verified_compile
 
 
-@ai_verified_compile(
-    lean_spec=LeanSpec(
-        proposition="result = values.foldl (fun total value => total + value) 0",
-    ),
-    config=VerifiedCompileConfig(mathlib_revision=None),
-)
-def sum_values(values: list[int]) -> int:
-    """Return the sum of values."""
+def adds_one(result: int, value: int) -> bool:
+    return result == value + 1
 
 
-print(sum_values([3, -2, 10]))  # 11
+@ai_verified_compile(post_condition=adds_one)
+def increment(value: int) -> int:
+    """Return one more than value."""
+
+
+print(increment(41))  # 42
 ```
 
-Lean errors, code-generation failures, and native-link failures are fed back through the normal AI Functions retry loop. The accepted implementation is compiled to C and imported by the proof as the exact `.olean` produced during that same compilation pass. The model is therefore outside the trust boundary; the reviewed Lean specification, Lean kernel and compiler, generated FFI shim, and native C toolchain remain in it.
+The model generates only the implementation and proof; it cannot modify the
+fixed contract. Lean errors, code-generation failures, and native-link failures
+are fed back through the normal AI Functions retry loop. The accepted
+implementation is compiled to C and imported by the proof as the exact
+`.olean` produced during that same compilation pass.
 
-This feature currently supports macOS and Linux, with `int`, `bool`, `float`, and `list[int]` inputs and scalar `int`, `bool`, or `float` results. It requires an [elan](https://lean-lang.org/lean4/doc/setup.html)-managed Lean installation and a native C compiler. See [Lean-verified compilation](docs/verified_compile.md) for the trust model, Python-post-condition mode, artifacts, and configuration.
+The decorator automatically provisions an isolated Lean toolchain on macOS and
+Linux. Users review Python and do not need to understand or install Lean. The
+initial verified contract subset covers pure expressions over `int`, `bool`,
+and `list[int]`; unsupported syntax fails closed. See
+[Lean-verified compilation](docs/verified_compile.md) for the exact subset,
+trust model, artifacts, and configuration.
 
 ## Native Python Objects
 

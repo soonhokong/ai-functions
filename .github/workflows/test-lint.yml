@@ -60,13 +60,6 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: Set up Lean
-        uses: leanprover/lean-action@v1
-        with:
-          auto-config: false
-          lake-package-directory: tests/fixtures/verified_compile
-          use-mathlib-cache: false
-
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
@@ -75,5 +68,7 @@ jobs:
       - name: Run Lean-to-native integration tests
         env:
           AI_FUNCTIONS_LEAN_TOOLCHAIN: leanprover/lean4:v4.33.1
+          AI_FUNCTIONS_LEAN_TOOLCHAIN_MODE: managed
           AI_FUNCTIONS_RUN_LEAN_TESTS: '1'
+          AI_FUNCTIONS_VERIFIED_COMPILE_TEST_CACHE: ${{ runner.temp }}/ai-functions-verified-compile
         run: pytest -q tests/test_verified_compile_native.py

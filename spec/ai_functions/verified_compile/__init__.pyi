@@ -8,6 +8,8 @@ from .errors import (
     LeanFFIError,
     LeanSetupError,
     LeanVerificationError,
+    PythonContractError,
+    PythonContractViolation,
     VerifiedCompileConfigurationError,
     VerifiedCompileError,
 )
@@ -20,6 +22,8 @@ __all__ = [
     "LeanSetupError",
     "LeanSpec",
     "LeanVerificationError",
+    "PythonContractError",
+    "PythonContractViolation",
     "VerifiedCompileConfig",
     "VerifiedCompileConfigurationError",
     "VerifiedCompileError",

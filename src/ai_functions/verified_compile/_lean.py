@@ -14,6 +14,7 @@ from pathlib import Path
 from ._ffi import generate_c_shim
 from ._locking import exclusive_file_lock
 from ._source import RenderedLeanSource
+from ._toolchain import LeanCommandEnvironment, LeanToolchain
 from ._types import FunctionShape
 from .config import VerifiedCompileConfig
 from .errors import LeanCompilationError, LeanSetupError, LeanVerificationError
@@ -31,7 +32,7 @@ def shared_library_suffix() -> str:
 
 
 def _environment_key(config: VerifiedCompileConfig) -> str:
-    payload = f"{config.lean_toolchain}\0{config.mathlib_revision or 'core-only'}"
+    payload = f"{config.toolchain_mode}\0{config.lean_toolchain}\0{config.mathlib_revision or 'core-only'}"
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -41,6 +42,12 @@ class LeanProject:
     def __init__(self, config: VerifiedCompileConfig) -> None:
         self.config = config
         self.root = Path(config.cache_dir).expanduser().resolve() / "environments" / _environment_key(config)
+        self._command_environment: LeanCommandEnvironment | None = None
+
+    def _commands(self) -> LeanCommandEnvironment:
+        if self._command_environment is None:
+            self._command_environment = LeanToolchain(self.config).ensure()
+        return self._command_environment
 
     def _run(
         self,
@@ -52,6 +59,9 @@ class LeanProject:
         action: str,
         extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        command_environment = self._commands()
+        if command and command[0] == "lake":
+            command = [str(command_environment.lake), *command[1:]]
         logger.debug("verified compile: %s", " ".join(command))
         try:
             result = subprocess.run(
@@ -61,12 +71,15 @@ class LeanProject:
                 text=True,
                 timeout=timeout,
                 check=False,
-                env={**os.environ, **(extra_env or {})},
+                env={
+                    **os.environ,
+                    **command_environment.environment,
+                    **(extra_env or {}),
+                },
             )
         except FileNotFoundError as exc:
             raise error_type(
-                f"{command[0]!r} was not found while {action}. "
-                "Install Lean with elan and ensure its shims are on PATH.",
+                f"{command[0]!r} was not found while {action}",
             ) from exc
         except subprocess.TimeoutExpired as exc:
             raise error_type(f"Timed out after {timeout:g}s while {action}") from exc
