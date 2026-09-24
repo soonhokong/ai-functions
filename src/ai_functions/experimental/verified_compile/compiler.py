@@ -27,32 +27,10 @@ from ._runtime import _NATIVE_LOCK, Runtime
 from .contracts import Scalar, Specification
 from .errors import CandidateError, CompilerError
 
-TRANSLATOR_VERSION = 3
+# Part of every cache key. Bump it whenever the emitted Lean for a contract changes.
+TRANSLATOR_VERSION = 4
 _NATIVE_KINDS = {int: 1, bool: 2, float: 3, list: 4}
 _MAX_SOURCE = 32_768
-
-SPEC_HELPERS = """public def pythonIndex (length : Nat) (index : Int) : Nat :=
-  (max 0 (min (Int.ofNat length) (if index < 0 then Int.ofNat length + index else index))).toNat
-public def pythonSlice (xs : List Int) (start stop : Option Int) : List Int :=
-  let first := (start.map (pythonIndex xs.length)).getD 0
-  let last := (stop.map (pythonIndex xs.length)).getD xs.length
-  (xs.drop first).take (last - first)
-public theorem pythonIndex_ofNat (length index : Nat) (h : index <= length) :
-    pythonIndex length (Int.ofNat index) = index := by
-  simp [pythonIndex, Int.min_def, Int.max_def]
-  omega
-public theorem pythonSlice_prefix (xs : List Int) (n : Nat) (h : n <= xs.length) :
-    pythonSlice xs none (some (Int.ofNat n)) = xs.take n := by
-  change (xs.drop 0).take (pythonIndex xs.length (Int.ofNat n) - 0) = xs.take n
-  rw [pythonIndex_ofNat xs.length n h]
-  simp
-public theorem pythonSlice_suffix (xs : List Int) (n : Nat) (h : n <= xs.length) :
-    pythonSlice xs (some (Int.ofNat n)) none = xs.drop n := by
-  change (xs.drop (pythonIndex xs.length (Int.ofNat n))).take
-    (xs.length - pythonIndex xs.length (Int.ofNat n)) = xs.drop n
-  rw [pythonIndex_ofNat xs.length n h]
-  rw [← List.length_drop, List.take_length]
-"""
 
 
 class Candidate(BaseModel):
@@ -81,7 +59,15 @@ _IMPL_WORDS = {
     "Int.negOfNat",
     "Int.negSucc",
     "Int.toNat",
+    # `(hi - lo).toNat`, the usual termination measure for a search over an Int range.
+    "toNat",
     "Int.ediv",
+    "Int.fdiv",
+    "Int.fmod",
+    "Option.getD",
+    "Float.sqrt",
+    "pythonAt",
+    "pythonRange",
     "List",
     "Array",
     "Option",
@@ -155,6 +141,8 @@ _PROOF_WORDS = _IMPL_WORDS | {
     "assumption",
     "contradiction",
     "trivial",
+    "done",
+    "generalize",
     "classical",
     "by_cases",
     "by_contra",
@@ -235,6 +223,7 @@ _PROOF_WORDS = _IMPL_WORDS | {
     "pythonIndex_ofNat",
     "pythonSlice_prefix",
     "pythonSlice_suffix",
+    "pythonAt_ofNat",
     "if_neg",
     "if_pos",
     "if_false",
@@ -297,8 +286,13 @@ def _local_names(source: str) -> set[str]:
     """Collect apparent binder names for the lexical vocabulary checks."""
     names: set[str] = set()
     patterns = [
-        r"\b(?:intro|intros|rename_i)\s+([^;\n<|]+)",
+        r"\b(?:intro|intros|rintro|rename_i)\s+([^;\n<|]+)",
         r"\b(?:let|have|by_cases|by_contra|obtain)\s+(?:rec\s+)?([A-Za-z_][A-Za-z0-9_']*)",
+        # `obtain ⟨n, hn, hle⟩ := h` binds every name inside the brackets. Without
+        # this the tactic is permitted while the names it introduces are rejected.
+        # Non-greedy, so a later group on the same line cannot pull in the names of
+        # the term being destructured.
+        r"\b(?:obtain|rintro|rcases|refine)\s*[⟨<]([^\n]*?)[⟩>]",
         r"\bfun\s+([^=\n]+?)\s*=>",
         r"\(([A-Za-z_][A-Za-z0-9_' ]*)\s*:",
         r"\|\s*([^=>\n]+?)\s*=>",
@@ -311,7 +305,7 @@ def _local_names(source: str) -> set[str]:
     return names - _FORBIDDEN_WORDS
 
 
-def validate_candidate(candidate: Candidate, arity: int) -> None:
+def validate_candidate(candidate: Candidate, arity: int, names: frozenset[str] = frozenset()) -> None:
     """Apply lexical restrictions before Lean parsing and proof checking."""
     for name, source, words in (
         ("implementation", candidate.implementation, _IMPL_WORDS),
@@ -321,7 +315,7 @@ def validate_candidate(candidate: Candidate, arity: int) -> None:
             raise CandidateError(
                 f"The {name} must be a nonempty term without comments, at most {_MAX_SOURCE} characters."
             )
-        if re.search(r"[^a-zA-Z0-9_\s()\[\]{}:;,=<>+*/!&|.?'\-≤≥≠¬∧∨→←↔↦∀∃∈∉⟨⟩↑·⊢]", source):
+        if re.search(r"[^a-zA-Z0-9_\s()\[\]{}:;,=<>+*/%^!&|.?'\-≤≥≠¬∧∨→←↔↦∀∃∈∉⟨⟩↑·⊢×]", source):
             raise CandidateError(f"The {name} contains unsupported syntax. Do not use strings, comments, or commands.")
         if re.search(r"[\]A-Za-z0-9_']!(?!=)", source):
             raise CandidateError("Panicking operations and native proof shortcuts are not permitted.")
@@ -330,7 +324,7 @@ def validate_candidate(candidate: Candidate, arity: int) -> None:
         for word in re.findall(r"[a-zA-Z_][a-zA-Z0-9_'.]*", names_source):
             if word in _FORBIDDEN_WORDS or word.split(".")[0] in ("Lean", "IO", "System"):
                 raise CandidateError(f"The {name} cannot use {word!r}.")
-            if word in words or word == "_":
+            if word in words or word == "_" or word in names:
                 continue
             if word in locals_:
                 continue
@@ -340,6 +334,11 @@ def validate_candidate(candidate: Candidate, arity: int) -> None:
                 continue
             root, _, projection = word.partition(".")
             if name == "proof" and root in locals_ and projection:
+                continue
+            # A `let rec` inside the implementation is `implementation.<name>`, with generated
+            # lemmas such as `implementation.go.eq_1` and `implementation.go.induct`. Without
+            # them, local recursion is permitted but cannot be reasoned about.
+            if name == "proof" and root == "implementation" and projection:
                 continue
             if (root in locals_ or re.fullmatch(r"[vt]\d+", root)) and projection in (
                 "length",
@@ -373,14 +372,12 @@ def validate_candidate(candidate: Candidate, arity: int) -> None:
 
 def source(spec: Specification, candidate: Candidate, module: str) -> str:
     """Place model terms in a fixed module with a fixed theorem and FFI entry."""
-    validate_candidate(candidate, len(spec.parameters))
+    validate_candidate(candidate, len(spec.parameters), spec.definition_names)
     quantifier = f"forall {spec.binders}, " if spec.parameters else ""
     args = spec.arguments
     actual = f"(implementation {args})" if args else "implementation"
-    theorem = f"{quantifier}pre {args} = true -> post {actual} {args} = true"
-    declarations = spec.declarations().replace("\ndef ", "\npublic def ")
-    if declarations.startswith("def "):
-        declarations = "public " + declarations
+    theorem = f"{quantifier}{f'pre {args}'.strip()} -> {f'post {actual} {args}'.strip()}"
+    declarations = re.sub(r"^(abbrev |def )", r"public \1", spec.declarations(), flags=re.MULTILINE)
     implementation = textwrap.indent(candidate.implementation.strip(), "    ")
     proof = textwrap.indent(candidate.proof.strip(), "  ")
     return f"""module
@@ -390,7 +387,7 @@ set_option maxHeartbeats 400000
 set_option maxRecDepth 1024
 set_option linter.unusedVariables false
 namespace {module}
-{SPEC_HELPERS}
+{spec.helpers()}
 {declarations}
 public def implementation {spec.binders} : {spec.result_type} :=
   (

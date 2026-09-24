@@ -29,7 +29,6 @@ from ..lean.locking import async_exclusive_file_lock
 from ..lean.toolchain import DEFAULT_LEAN_TOOLCHAIN
 from ._runtime import require_supported_python, resolve_runtime
 from .compiler import (
-    SPEC_HELPERS,
     Artifact,
     Candidate,
     build_candidate,
@@ -53,6 +52,18 @@ def _prompt(spec: Specification) -> str:
     arguments = ", ".join(f"{name} is v{i}: {kind_name(kind)}" for i, (name, kind) in enumerate(spec.parameters))
     quantifier = f"forall {spec.binders}, " if spec.parameters else ""
     args = spec.arguments
+    helpers = spec.helpers()
+    notes = []
+    if spec.definitions:
+        names = ", ".join(d.name for d in spec.definitions)
+        notes.append(
+            f"The definitions {names} come from Python helpers and loops. Unfold them with\n"
+            "`simp only [name]` or `unfold name`; the implementation may call them. A loop is\n"
+            "a List.foldl; prove facts about it by induction on the list, generalizing the\n"
+            "accumulator. A name ending in _defined states when Python evaluates it without raising.\n"
+        )
+    if "pythonAt" in helpers:
+        notes.append("pythonAt xs i is Python's xs[i]; pythonAt_ofNat rewrites it for an in-range natural index.\n")
     return f"""Synthesize a pure, total Lean {spec.result_type} function and its proof.
 Return the structured Candidate with implementation and proof fields only.
 Inputs: {arguments or "(no arguments)"}.
@@ -60,32 +71,49 @@ Author guidance (the formal contracts below are authoritative):
 {spec.guidance}
 
 The following declarations are fixed and cannot be changed:
-{SPEC_HELPERS}
+{helpers}
 {spec.declarations()}
-
+{"".join(notes)}
 Your implementation field is ONLY the expression body of:
 def implementation {spec.binders} : {spec.result_type} := ...
 Your proof field is ONLY the term beginning with `by` proving:
-{quantifier}pre {args} = true -> post (implementation {args}) {args} = true
+{quantifier}pre {args} -> post (implementation {args}) {args}
 
 Implementation vocabulary: inputs v0, v1, ...; locals t0, t1, ...; decimal or
-hexadecimal integer literals; true/false; if/then/else; let; +, -, *; comparisons and Boolean
-operators; min, max, abs, Int.natAbs, Int.ofNat, Int.ediv, Nat.sqrt; pure List/Array functions,
-and Float arithmetic/classification. Explicitly terminating local recursion is allowed.
+hexadecimal integer literals; true/false; if/then/else; let; +, -, *, /, %, ^; comparisons and
+Boolean operators; min, max, Int.natAbs, Int.ofNat, Int.ediv, Int.fdiv, Int.fmod, Nat.sqrt,
+Option.getD; pure List/Array functions, and Float arithmetic/classification including Float.sqrt.
+Local recursion uses `let rec go ... termination_by ...` inside the implementation; proofs
+refer to it as implementation.go, with implementation.go.eq_1 and implementation.go.induct.
+Python's // and % are Int.fdiv and Int.fmod; Lean's / on Int is Euclidean and differs for
+negative divisors.
 List inputs/outputs are List Int. Float inputs/outputs use binary64, not real arithmetic.
 Use Float.beq for floating-point equality; NaN is unequal to itself, while signed zeroes compare equal.
 Do not use floating-point bit inspection, IO, partial definitions, or panicking operations.
 Proof vocabulary: intro, exact, apply, refine, have, show, cases, constructor,
 split, simp, simp_all, only, at, all_goals, first, try, repeat, omega, grind,
-decide, rfl, assumption, contradiction, trivial, by_cases, subst, rw, simpa, unfold,
-dsimp, change, revert, rcases, induction, calc. Use explicit binders for local names.
-Core Int/Nat/Bool/List/Array/Float lemmas are allowed. Propositional simplification
-lemmas and_true, true_and, and_false, false_and, or_true, true_or, or_false, false_or,
-and_self, and or_self are allowed too; these differ from the Bool-prefixed lemmas.
+decide, rfl, assumption, contradiction, trivial, done, by_cases, subst, rw, simpa,
+unfold, dsimp, change, revert, rcases, obtain, induction, calc.
+Destructuring binders such as `obtain ⟨n, hn⟩ := h` are supported.
+Core Int/Nat/Bool/List/Array/Float lemmas are allowed.
+The specification is stated in Prop, built from decidable atoms with ∧, ∨, ¬, ↔,
+`if c then P else Q`, and bounded `∀ x ∈ xs,` / `∃ x ∈ xs,`. Bool values appear
+only as `b = true`, including Lean's Bool-valued Float comparisons and classifiers,
+and a Bool result compared with a condition appears as `r = true ↔ P`.
+Your implementation is executable, so it computes with Bool: List.all, List.any and
+List.findIdx take Bool predicates. Relate it to the specification with
+List.all_eq_true, List.any_eq_true, Bool.and_eq_true, and decide_eq_true_eq, which
+plain simp also applies. `pre` and `post` are abbreviations of the indexed contracts,
+so `decide` and instance search see through them. Unfold with `simp only [pre, post]`,
+adding the indexed names such as `pre0` and `post0` that appear in the declarations
+above. Take a hypothesis apart
+with `obtain ⟨h0, h1⟩ := h` or `h.left` and `h.right`; build a conjunction goal with
+`refine ⟨?_, ?_⟩` or `constructor`; use `split` for an `if` in the goal, not for a
+conjunction.
 The trusted environment is {DEFAULT_LEAN_TOOLCHAIN}, with `public import Init`
 and `meta import all Lean`, including omega and grind, but no Mathlib.
 You have only the Candidate output tool; Lean checking runs after you submit it.
-Useful list lemmas include List.all_eq_true, List.any_eq_true, List.pairwise_cons,
+Useful list lemmas include List.pairwise_cons,
 List.findIdx_nil, List.findIdx_cons, List.findIdx_le_length, List.not_of_lt_findIdx,
 List.Pairwise.rel_of_mem_take_of_mem_drop, List.take_succ_cons, List.drop_succ_cons,
 List.length_take, List.length_drop, and List.length_cons. Sortedness is List.Pairwise.
@@ -102,11 +130,11 @@ obligations to linear arithmetic for omega.
 Before omega on Int.ofNat expressions, normalize casts with
 `simp only [Int.ofNat_eq_natCast] at *`. For nonnegative, in-range slice indices,
 pythonIndex_ofNat, pythonSlice_prefix, and pythonSlice_suffix are available.
-An often useful proof is: by intro v0 v1 v2 h; simp_all [pre, post, implementation]; split <;> simp_all <;> omega
+An often useful proof is:
+  by intro v0 v1 v2 h; simp only [pre, post, implementation] at *; refine ⟨?_, ?_⟩ <;> split <;> omega
 For nested conditionals, split all remaining branches, not just the outermost one.
-After simplifying Boolean contracts and case-splitting comparisons, omega may still
-fail on goals containing conjunctions and disjunctions. Use `first | omega | grind`
-to finish those branches instead of treating omega failure as a counterexample.
+Where omega stalls, use `first | omega | grind` to finish that branch instead of
+treating the omega failure as a counterexample.
 The `first` tactic accepts the first alternative that does not fail, even if goals
 remain. Do not put bare simp or simp_all among its closing alternatives; follow
 simplification with a tactic that closes every remaining goal.

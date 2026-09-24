@@ -49,7 +49,11 @@ def check_clamp(result, x, lo, hi):
 
 GOOD = Candidate(
     implementation="if v0 < v1 then v1 else if v0 > v2 then v2 else v0",
-    proof="by\n  intro v0 v1 v2 h\n  simp_all [pre, post, implementation]\n  split <;> simp_all <;> omega",
+    proof=(
+        "by\n  intro v0 v1 v2 h\n"
+        "  simp only [pre, pre0, post, post0, implementation] at *\n"
+        "  repeat first | omega | split | constructor"
+    ),
 )
 WRONG = Candidate(
     implementation="v0",
@@ -113,7 +117,7 @@ async def test_property_specified_median_matches_independent_sorting_oracle(tmp_
         implementation="max (min v0 v1) (min (max v0 v1) v2)",
         proof=(
             "by\n  intro v0 v1 v2 h\n"
-            "  simp_all [pre, post, implementation, Int.min_def, Int.max_def]\n"
+            "  simp_all [pre, post, post0, implementation, Int.min_def, Int.max_def]\n"
             "  repeat first | omega | (split <;> simp_all)"
         ),
     )
@@ -265,7 +269,7 @@ async def test_boolean_inputs_and_result_via_native_ffi(tmp_path, native_runtime
 
     candidate = Candidate(
         implementation="v0 != v1",
-        proof="by\n  intro v0 v1 h\n  cases v0 <;> cases v1 <;> rfl",
+        proof="by\n  intro v0 v1 h\n  cases v0 <;> cases v1 <;> decide",
     )
     llm = model(candidate)
     fn = verified_ai_compile[bool](post_conditions=[contract], model=llm, cache_dir=tmp_path, max_attempts=0)(xor)
@@ -283,7 +287,7 @@ async def test_zero_argument_function_and_explicit_sync_compile(tmp_path, native
     def contract(result):
         assert result == 7
 
-    llm = model(Candidate(implementation="7", proof="by simp [pre, post, implementation]"))
+    llm = model(Candidate(implementation="7", proof="by simp [pre, post, post0, implementation]"))
     fn = verified_ai_compile(post_conditions=[contract], cache_dir=tmp_path, model=llm)(seven)
     # The sync bridge must also work when the caller already has an event loop.
     assert fn.compile_sync() is fn
@@ -297,11 +301,11 @@ async def test_core_propositional_simp_lemmas_are_accepted(tmp_path, native_runt
     def contract(result, value):
         assert result == value and True
 
-    # A live payout synthesis used and_true after Bool.and_eq_true turned its
-    # contract into a proposition. The lexical filter must admit that core lemma.
+    # `and True` in a contract leaves an `∧ True` conjunct, closed by the core
+    # propositional lemma and_true. The lexical filter must admit it.
     candidate = Candidate(
         implementation="v0",
-        proof=("by\n  intro v0 h\n  simp only [post, implementation, Bool.and_eq_true, decide_eq_true_eq, and_true]"),
+        proof=("by\n  intro v0 h\n  simp only [post, post0, implementation, and_true]"),
     )
     fn = verified_ai_compile(post_conditions=[contract], model=model(candidate), cache_dir=tmp_path, max_attempts=0)(
         identity
@@ -319,7 +323,7 @@ async def test_list_quantifiers_and_list_results_via_native_ffi(tmp_path, native
 
     candidate = Candidate(
         implementation="List.all v0 (fun t0 => decide (t0 < v1))",
-        proof="by intro v0 v1 h; simp [pre, post, implementation]",
+        proof="by intro v0 v1 h; simp [pre, post, post0, implementation]",
     )
     fn = verified_ai_compile(post_conditions=[bounded], model=model(candidate), cache_dir=tmp_path, max_attempts=0)(
         all_below
@@ -334,7 +338,7 @@ async def test_list_quantifiers_and_list_results_via_native_ffi(tmp_path, native
     def same(result, values):
         assert result == values
 
-    echo_model = model(Candidate(implementation="v0", proof="by intro v0 h; simp [pre, post, implementation]"))
+    echo_model = model(Candidate(implementation="v0", proof="by intro v0 h; simp [pre, post, post0, implementation]"))
     copied = verified_ai_compile(post_conditions=[same], model=echo_model, cache_dir=tmp_path, max_attempts=0)(echo)
     values = [-(2**20000), 0, 2**20000]
     assert await copied(values) == values
@@ -350,7 +354,7 @@ async def test_float_classification_signed_zero_and_nan_normalization(tmp_path, 
 
     candidate = Candidate(
         implementation="Float.isFinite v0 && Float.le (Float.ofBits (0x0000000000000000 : UInt64)) v0",
-        proof="by intro v0 h; simp [pre, post, implementation]",
+        proof="by intro v0 h; simp [pre, post, post0, implementation]",
     )
     fn = verified_ai_compile(post_conditions=[classified], model=model(candidate), cache_dir=tmp_path, max_attempts=0)(
         finite_nonnegative
@@ -367,7 +371,7 @@ async def test_float_classification_signed_zero_and_nan_normalization(tmp_path, 
 
     copied = verified_ai_compile(
         post_conditions=[preserves_classification],
-        model=model(Candidate(implementation="v0", proof="by intro v0 h; simp [pre, post, implementation]")),
+        model=model(Candidate(implementation="v0", proof="by intro v0 h; simp [pre, post, post0, implementation]")),
         cache_dir=tmp_path,
         max_attempts=0,
     )(identity)
@@ -390,7 +394,7 @@ async def test_float_arithmetic_preserves_rounding_and_does_not_fuse_operations(
 
     candidate = Candidate(
         implementation="Float.beq (v0 * v1 + v2) v3",
-        proof="by intro v0 v1 v2 v3 h; simp [pre, post, implementation]",
+        proof="by intro v0 v1 v2 v3 h; simp [pre, post, post0, implementation]",
     )
     fn = verified_ai_compile(post_conditions=[contract], model=model(candidate), cache_dir=tmp_path, max_attempts=0)(
         multiply_add_equals

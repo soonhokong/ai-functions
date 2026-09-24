@@ -251,17 +251,39 @@ hatch run python examples/verified_payout.py --show-artifacts
   Integers retain arbitrary precision. Values must have the declared type;
   implicit integer/Boolean/float conversions are not performed.
 - Validators are ordinary synchronous functions available in Python source
-  files. Local assignments, `if`/`elif`/`else`, conditional expressions, early
-  returns, assertions, and simple explicit failures are supported.
-- Expressions support `+`, `-`, `*`, comparisons, and Boolean logic. Lists
-  support equality, membership, concatenation, `len`, `sorted`, and slices
+  files. Local assignments (including `x += 1` and `a, b = b, a`),
+  `if`/`elif`/`else`, conditional expressions, early returns, assertions, and
+  simple explicit failures are supported.
+- Expressions support `+`, `-`, `*`, `//`, `%`, `**` with a non-negative integer
+  literal exponent, float `/`, comparisons, and Boolean logic, plus `abs`, `min`,
+  `max`, `sum`, and `math.sqrt`. Lists support equality, membership,
+  concatenation, indexing (including negative indices), `len`, `sorted`,
+  `list`, `reversed`, `.count()`, `.index()`, list comprehensions, and slices
   without a step. A shallow snapshot of list references prevents caller
   mutation during validation or compilation from changing the verified input;
   the integer values are not copied.
-- Bounded `all` and `any` generators over integer lists and slices are supported,
-  including filters and nested quantifier expressions. Empty-domain and
-  short-circuit behavior follow Python. General indexing, stepped slices,
-  arbitrary calls, mutation, async validators, and AI validators are rejected.
+- Loops, comprehensions, and bounded `all`/`any` iterate over integer lists,
+  slices, `range()` (with any nonzero step), `zip()` of two, `enumerate()`
+  (optionally with a start), and `reversed()`, with filters and nested
+  quantifiers. Empty-domain and short-circuit behavior follow Python.
+- Calls to other functions in the same subset are supported and appear in the
+  specification as named Lean definitions. Recursive helpers are rejected.
+- `for` loops that update variables initialized before the loop are supported
+  and become `List.foldl` definitions. Loop bodies contain assignments and `if`
+  statements; `break`, `continue`, `return`, assertions inside the loop, and
+  `while` are rejected.
+- Operations that raise in Python (`//` or `%` by zero, float `/` by zero,
+  `math.sqrt` of a negative, out-of-range indexing, `min`/`max` of an empty
+  list, `.index()` of a missing value, a zero `range()` step) make the contract
+  fail exactly where Python would raise. Quantifiers require every element to be
+  defined, which is stricter than Python stopping at the first false element. A
+  loop whose raising operation depends on a branch over the loop's own
+  variables requires that operation to be defined on every iteration. Stricter
+  is sound: a precondition rejects more inputs, and a postcondition asks the
+  proof for more.
+- Stepped slices, `while`, arbitrary method calls, mutation, float `//` and `%`,
+  float `sum` (CPython 3.12 sums floats with compensated summation), async
+  validators, and AI validators are rejected.
 - Captured numeric constants are frozen when the decorator is applied.
   Reapply the decorator to create a new specification after changing a captured
   constant. Mutable captured state is rejected.
@@ -299,10 +321,12 @@ negative zero compare equal. `math.isfinite`, `math.isnan`, and `math.isinf` are
 supported in contracts. Use float literals such as `0.0` in float comparisons;
 mixed integer/float comparisons are rejected rather than rounded silently.
 
-Addition, subtraction, multiplication, and negation use binary64 semantics.
-Native compilation disables multiply/add contraction to preserve separate
-rounding steps. Division and transcendental functions in Python contracts are
-not yet supported.
+Addition, subtraction, multiplication, division, negation, and `math.sqrt` use
+binary64 semantics. Native compilation disables multiply/add contraction to
+preserve separate rounding steps. Lean's kernel evaluates binary64 arithmetic
+on concrete values but not `Float.sqrt` of an ordinary value, so proofs about
+square roots are limited to implementations that mirror the specification.
+Other transcendental functions are not yet supported.
 
 Finite values, infinities, subnormals, and signed zero cross the boundary without
 decimal conversion. The pinned floating-point model/runtime canonicalizes NaNs;

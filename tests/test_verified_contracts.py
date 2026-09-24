@@ -108,15 +108,22 @@ def test_unsupported_source_is_rejected_even_after_a_return():
         specification(_function, [], [unsupported])
 
 
-def test_partial_arithmetic_and_arbitrary_calls_are_rejected():
-    def division(result, x):
-        assert result == x // 2
+def test_arithmetic_and_calls_outside_the_subset_are_rejected():
+    def true_division(result, x):
+        assert result == x / 2
+
+    def variable_exponent(result, x):
+        assert result == x**x
 
     def call(result, x):
-        assert result == abs(x)
+        assert result == round(x)
 
-    for validator in (division, call):
-        with pytest.raises(ContractError, match="not supported"):
+    for validator, message in (
+        (true_division, "use // for integer division"),
+        (variable_exponent, "non-negative int literal exponent"),
+        (call, "not supported"),
+    ):
+        with pytest.raises(ContractError, match=message):
             specification(_function, [], [validator])
 
 
@@ -178,7 +185,7 @@ def test_large_captured_constants_do_not_use_python_decimal_conversion():
         assert result == large
 
     spec = specification(_function, [], [contract])
-    assert "0x" in spec.post[0].predicate.lean()
+    assert "0x" in spec.post[0].predicate.prop()
     assert spec.post[0].predicate.evaluate({"r": large}) is True
     assert spec.post[0].predicate.evaluate({"r": large + 1}) is False
 
