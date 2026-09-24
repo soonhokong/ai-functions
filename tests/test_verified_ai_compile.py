@@ -314,6 +314,43 @@ async def test_runtime_contract_checks_are_opt_in(tmp_path, monkeypatch):
         await checked(5)
 
 
+async def test_sampled_test_reports_passes_failures_and_untested_candidates(tmp_path, native_runtime):
+    from ai_functions.experimental.verified_compile.compiler import run_sampled_test, sample_inputs
+
+    spec = decorate(tmp_path, model())._spec
+    inputs = sample_inputs(spec)
+
+    async def report(implementation, cases=inputs):
+        return await run_sampled_test(native_runtime, spec, implementation, cases, tmp_path, 120)
+
+    assert (await report(GOOD.implementation)).startswith(f"PASSED on {len(inputs)} sampled inputs")
+    wrong = await report(WRONG.implementation)
+    assert wrong.startswith("WRONG on") and "counterexample v0=" in wrong
+    assert (await report("v0 +")).startswith("The implementation did not compile")
+    assert (await report("IO.println 1")).startswith("REJECTED before running")
+    assert (await report(GOOD.implementation, [])).startswith("INCONCLUSIVE")
+
+
+async def test_synthesis_tests_and_checks_before_it_submits(tmp_path, native_runtime):
+    llm = ScriptedModel(
+        [
+            Turn(tool_calls=(("test_implementation", {"implementation": WRONG.implementation}),)),
+            Turn(tool_calls=(("test_implementation", {"implementation": GOOD.implementation}),)),
+            Turn(tool_calls=(("check_lean", GOOD.model_dump()),)),
+            Turn(tool_calls=(("Candidate", GOOD.model_dump()),)),
+        ]
+    )
+    fn = decorate(tmp_path, llm, max_attempts=0)
+    events = []
+    async with scope(on_event=events.append):
+        assert await fn(12) == 10
+    reports = [json.dumps(event.content) for event in events if event.kind == EventKind.TOOL_RESULT]
+    assert "WRONG on" in reports[0]
+    assert "PASSED on" in reports[1]
+    assert "VERIFIED" in reports[2]
+    assert llm.remaining_turns == 0
+
+
 async def test_missing_toolchain_fails_before_model_calls(tmp_path, monkeypatch):
     from ai_functions.experimental.lean import LeanConfig, LeanSetupError
 
@@ -490,7 +527,7 @@ async def test_output_token_exhaustion_retries_within_the_budget(tmp_path, nativ
     assert llm.remaining_turns == 0
 
 
-async def test_default_synthesis_uses_opus_5_with_a_proof_sized_budget(tmp_path, native_runtime, monkeypatch):
+async def test_default_synthesis_uses_opus_5_5_with_a_proof_sized_budget(tmp_path, native_runtime, monkeypatch):
     settings = {}
 
     def configured_model(**kwargs):
@@ -500,8 +537,8 @@ async def test_default_synthesis_uses_opus_5_with_a_proof_sized_budget(tmp_path,
     monkeypatch.setattr("ai_functions.experimental.verified_compile.function.BedrockModel", configured_model)
     fn = decorate(tmp_path, None, max_attempts=0)
     assert await fn(12) == 10
-    assert settings["model_id"] == "global.anthropic.claude-opus-5"
-    assert settings["max_tokens"] == 65536
+    assert settings["model_id"] == "global.anthropic.claude-opus-5-5"
+    assert settings["max_tokens"] == 32768
     assert settings["boto_client_config"].read_timeout == 900
 
 

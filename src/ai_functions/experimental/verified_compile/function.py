@@ -16,6 +16,7 @@ import platformdirs
 from botocore.config import Config as BotocoreConfig
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError
 from botocore.exceptions import ReadTimeoutError as BotoReadTimeoutError
+from strands import tool
 from strands.models import BedrockModel
 from strands.types.exceptions import MaxTokensReachedException
 from urllib3.exceptions import ReadTimeoutError as HTTPReadTimeoutError
@@ -27,13 +28,15 @@ from ..lean import LeanConfig
 from ..lean.execution import run_in_thread
 from ..lean.locking import async_exclusive_file_lock
 from ..lean.toolchain import DEFAULT_LEAN_TOOLCHAIN
-from ._runtime import require_supported_python, resolve_runtime
+from ._runtime import Runtime, require_supported_python, resolve_runtime
 from .compiler import (
     Artifact,
     Candidate,
     build_candidate,
     cache_key,
     read_artifact,
+    run_sampled_test,
+    sample_inputs,
     write_manifest,
 )
 from .contracts import Scalar, Specification, kind_name, specification
@@ -42,10 +45,31 @@ from .errors import CandidateError, CompilerError, ModelSetupError, SynthesisErr
 if TYPE_CHECKING:
     from strands.models import Model
 
-_DEFAULT_MODEL_ID = "global.anthropic.claude-opus-5"
-_DEFAULT_MAX_TOKENS = 65536
+_DEFAULT_MODEL_ID = "global.anthropic.claude-opus-5-5"
+_DEFAULT_MAX_TOKENS = 32768
 _DEFAULT_READ_TIMEOUT = 900
+# Calls per synthesis attempt, shared by test_implementation and check_lean.
+_TOOL_CALLS = 24
 _logger = logging.getLogger(__name__)
+
+_TOOLS_PROMPT = """
+You have two tools, and {calls} calls in total across both.
+
+test_implementation(implementation) runs your implementation against the contracts
+on sampled inputs that satisfy the preconditions, and returns a counterexample if it
+is wrong. It needs no proof and takes a few seconds.
+check_lean(implementation, proof) runs the real checker and returns VERIFIED or the
+exact rejection text.
+
+Work in this order. First call test_implementation with your best guess at the
+implementation, even a rough one. If it reports a counterexample, fix the
+implementation and call it again. Only once it passes should you write a proof and
+call check_lean. After a check_lean rejection, fix only the first reported error and
+call again. Do not derive at length before calling a tool, and do not simulate Lean
+in your head: a counterexample costs seconds and tells you more than reasoning does.
+When check_lean reports VERIFIED, return the Candidate containing exactly the two
+strings that verified.
+"""
 
 
 def _prompt(spec: Specification) -> str:
@@ -112,7 +136,6 @@ with `obtain ⟨h0, h1⟩ := h` or `h.left` and `h.right`; build a conjunction g
 conjunction.
 The trusted environment is {DEFAULT_LEAN_TOOLCHAIN}, with `public import Init`
 and `meta import all Lean`, including omega and grind, but no Mathlib.
-You have only the Candidate output tool; Lean checking runs after you submit it.
 Useful list lemmas include List.pairwise_cons,
 List.findIdx_nil, List.findIdx_cons, List.findIdx_le_length, List.not_of_lt_findIdx,
 List.Pairwise.rel_of_mem_take_of_mem_drop, List.take_succ_cons, List.drop_succ_cons,
@@ -140,7 +163,63 @@ remain. Do not put bare simp or simp_all among its closing alternatives; follow
 simplification with a tactic that closes every remaining goal.
 Use the appropriate number of inputs. No comments, strings, imports, commands,
 custom attributes, sorry/admit, unsafe code, native_decide, or run_tac.
-"""
+{_TOOLS_PROMPT.format(calls=_TOOL_CALLS)}"""
+
+
+def _synthesis_tools(
+    runtime: Runtime,
+    spec: Specification,
+    inputs: list[dict[str, Scalar]],
+    cache: Path,
+    timeout: float,
+    state: dict[str, int],
+) -> list[Any]:
+    """Build the tools for one compilation; they share a call budget per attempt."""
+
+    def exhausted() -> bool:
+        state["calls"] += 1
+        return state["calls"] > _TOOL_CALLS
+
+    @tool(name="test_implementation")
+    async def test_implementation(implementation: str) -> str:
+        """Run an implementation against the contracts on sampled inputs, without a proof.
+
+        Args:
+            implementation: The expression body of `def implementation ... := ...`.
+
+        Returns:
+            PASSED, a counterexample, or the reason nothing ran.
+        """
+        if exhausted():
+            return "Call budget exhausted. Return your best Candidate now."
+        with tempfile.TemporaryDirectory(prefix="test-", dir=cache) as temporary:
+            return await run_sampled_test(runtime, spec, implementation, inputs, Path(temporary), timeout)
+
+    @tool(name="check_lean")
+    async def check_lean(implementation: str, proof: str) -> str:
+        """Check an implementation and proof with the real checker.
+
+        Args:
+            implementation: The expression body of `def implementation ... := ...`.
+            proof: A term beginning with `by` that proves the fixed theorem.
+
+        Returns:
+            VERIFIED, or the exact rejection text.
+        """
+        if exhausted():
+            return "Call budget exhausted. Return your best Candidate now."
+        try:
+            candidate = Candidate(implementation=implementation, proof=proof)
+        except ValueError as error:
+            return f"REJECTED.\n{error}"
+        with tempfile.TemporaryDirectory(prefix="check-", dir=cache) as temporary:
+            try:
+                await build_candidate(runtime, spec, candidate, Path(temporary), timeout)
+            except (CandidateError, CompilerError) as error:
+                return f"REJECTED.\n{error}"
+        return "VERIFIED. Return exactly these two strings as your Candidate now."
+
+    return [test_implementation, check_lean]
 
 
 class _VerifiedFunction[**P, T]:
@@ -232,6 +311,12 @@ class _VerifiedFunction[**P, T]:
                     boto_client_config=BotocoreConfig(read_timeout=_DEFAULT_READ_TIMEOUT, connect_timeout=30),
                 )
 
+            # Test-then-prove: the model can run an implementation on sampled inputs and
+            # check a proof before it submits. The submitted candidate is checked again below.
+            inputs = await asyncio.to_thread(sample_inputs, self._spec)
+            budget = {"calls": 0}
+            tools = _synthesis_tools(runtime, self._spec, inputs, self._cache, self._timeout, budget)
+
             @ai_function[Candidate](
                 model=synthesis_model,
                 max_attempts=0,
@@ -240,6 +325,7 @@ class _VerifiedFunction[**P, T]:
                 system_prompt=(
                     "Produce only the requested implementation and a complete proof of the fixed specification."
                 ),
+                tools=tools,
             )
             def synthesize(prompt: str) -> str:
                 return prompt
@@ -252,6 +338,7 @@ class _VerifiedFunction[**P, T]:
             try:
                 for _attempt in range(self._max_attempts + 1):
                     _logger.info("Synthesizing %s: attempt %d/%d", self.name, _attempt + 1, self._max_attempts + 1)
+                    budget["calls"] = 0
                     try:
                         candidate = await handle.run(prompt)
                     except MaxTokensReachedException:
@@ -290,6 +377,7 @@ class _VerifiedFunction[**P, T]:
                                 "a revised "
                                 "implementation and proof. Fix the first proof or elaboration errors; "
                                 "a later sorryAx audit error can be caused by Lean's recovery from those errors. "
+                                "Check the revision with check_lean before you return it. "
                                 f"Diagnostics:\n{exc}"
                             )
                             continue

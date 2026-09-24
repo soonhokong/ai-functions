@@ -373,12 +373,35 @@ decimal conversion. The pinned floating-point model/runtime canonicalizes NaNs;
 preserving a NaN's payload or sign bits is not part of this interface. Contracts
 cannot inspect raw floating-point bits.
 
+## How synthesis works
+
+Each synthesis attempt gives the model two tools, with 24 calls per attempt
+across both:
+
+- `test_implementation` runs a candidate implementation, without a proof, on up
+  to 100 sampled inputs that satisfy the preconditions, and reports the first
+  input where a postcondition fails. It runs in a separate Lean process after
+  the same lexical filter as the proof check, and takes seconds.
+- `check_lean` runs the full check: the Lean kernel, `leanchecker`, the axiom
+  audit, and the native build.
+
+The model is told to test an implementation before it writes a proof. The
+candidate it returns is checked again before it is installed, so no tool result
+counts as verification.
+
+Sampled inputs come from fixed values per type, plus the integer literals in the
+contracts and their neighbors, which are the usual boundaries. A draw that fails
+a precondition is discarded. When no draw satisfies the preconditions, the test
+reports that nothing ran. The sample only guides the model; the proof covers
+every input that satisfies the preconditions.
+
 ## Failures and configuration
 
 Setup errors and native build failures fail directly. Exhausted synthesis raises
 the existing `AIFunctionError` base type, with a function-oriented message and
 optional internal `diagnostics` for debugging. A failed candidate is never
-installed or executed, and there is no fallback to an unverified implementation.
+installed or called through the native bridge, and there is no fallback to an
+unverified implementation.
 
 `compile_timeout` sets the timeout in seconds for each compiler/checker stage
 (default 120). Cancellation terminates compiler subprocesses and releases cache

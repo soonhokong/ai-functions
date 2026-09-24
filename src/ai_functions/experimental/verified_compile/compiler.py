@@ -6,16 +6,19 @@ constructs; it is not a Lean parser or a process sandbox.
 The saved declarations are replayed by the kernel in a separate process before
 native compilation or loading. Shared Lean tooling provisions the pinned compiler
 and builds the direct Python/Lean bridge locally when needed.
+During synthesis, a filtered implementation can also run without a proof in a
+separate Lean process on sampled inputs; that test only guides the model.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import random
 import re
 import sys
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,8 +27,8 @@ from pydantic import BaseModel, Field
 from ..lean.errors import LeanError, LeanTimeoutError
 from ..lean.execution import run_command_async
 from ._runtime import _NATIVE_LOCK, Runtime
-from .contracts import Scalar, Specification
-from .errors import CandidateError, CompilerError
+from .contracts import Scalar, Specification, lean_type
+from .errors import CandidateError, CompilerError, ContractError
 
 # Part of every cache key. Bump it whenever the emitted Lean for a contract changes.
 TRANSLATOR_VERSION = 4
@@ -503,6 +506,161 @@ async def build_candidate(
         error.diagnostics = result.stdout + result.stderr
         raise error
     return module
+
+
+# Values to try per input type when testing a candidate. The contracts add their own
+# integer literals and neighbors, and the preconditions decide which draws are kept.
+# The largest integer is 2**20, so a loop bounded by an input still finishes quickly.
+_TEST_VALUES: dict[type, list[Scalar]] = {
+    int: [0, 1, -1, 2, 3, 10, -10, 100, 1000, -1000, 10000, 2**20],
+    bool: [True, False],
+    float: [0.0, -0.0, 1.0, -1.0, 0.5, 2.0, 1e10, -1e10],
+    list: [[], [0], [1], [1, 2, 3], [3, 1, 2], [-3, -1, 0, 2, 5], [5, -2, 7, 0, 7], [2, 2, 2], [-1000, 1000]],
+}
+_TEST_INPUTS = 100
+_TEST_DRAWS = 20_000
+
+
+def sample_inputs(spec: Specification, count: int = _TEST_INPUTS, draws: int = _TEST_DRAWS) -> list[dict[str, Scalar]]:
+    """Draw distinct inputs that satisfy the preconditions, for testing candidates.
+
+    Values come from fixed pools per type, plus the contracts' integer literals and
+    their neighbors, which are the usual boundaries. A draw that fails a
+    precondition is discarded, so the result is short, or empty, when the pools
+    rarely meet the preconditions. The proof, not this sample, is the guarantee.
+    """
+    expressions = [contract.predicate for contract in (*spec.pre, *spec.post)]
+    expressions += [part for definition in spec.definitions for part in (definition.body, definition.defined)]
+    literals = {
+        node.value + offset
+        for expression in expressions
+        for node in expression.walk()
+        if node.op == "literal" and type(node.value) is int and abs(node.value) <= 2**64
+        for offset in (-1, 0, 1)
+    }
+    pools = []
+    for _, kind in spec.parameters:
+        pool = list(_TEST_VALUES[kind])
+        if kind is int:
+            pool += sorted(literals.difference(pool), key=abs)[:24]
+        pools.append(pool)
+    generator = random.Random(0)
+    seen: set[str] = set()
+    inputs: list[dict[str, Scalar]] = []
+    for _ in range(draws):
+        values = {f"v{index}": generator.choice(pool) for index, pool in enumerate(pools)}
+        key = repr(values)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            spec.check_pre_conditions(values)
+        except (ContractError, ArithmeticError):
+            continue
+        inputs.append(values)
+        if len(inputs) == count:
+            break
+    return inputs
+
+
+def _lean_value(value: Scalar) -> str:
+    if type(value) is bool:
+        return "true" if value else "false"
+    if type(value) is list:
+        return "[" + ", ".join(str(item) for item in value) + "]"
+    return repr(value)
+
+
+def sampled_test_source(spec: Specification, implementation: str, inputs: Sequence[Mapping[str, Scalar]]) -> str:
+    """A standalone Lean program that runs one implementation on sampled inputs.
+
+    It reuses the translated `pre` and `post` verbatim and checks `pre` again, so an
+    input the Python evaluation admits but Lean does not is skipped.
+    """
+    args = spec.arguments
+    types = [lean_type(kind) for _, kind in spec.parameters]
+    if not types:
+        case_type, binder, literals = "Unit", "_", ["()"] * len(inputs)
+    elif len(types) == 1:
+        case_type, binder, literals = types[0], "v0", [_lean_value(values["v0"]) for values in inputs]
+    else:
+        case_type = " × ".join(types)
+        binder = "(" + ", ".join(f"v{index}" for index in range(len(types))) + ")"
+        literals = [
+            "(" + ", ".join(_lean_value(values[f"v{index}"]) for index in range(len(types))) + ")" for values in inputs
+        ]
+    reported = " ".join(f"v{index}={{v{index}}}" for index in range(len(types)))
+    declarations = f"{spec.helpers()}\n{spec.declarations()}".replace("public ", "")
+    body = textwrap.indent(implementation.strip(), "    ")
+    return f"""set_option maxHeartbeats 1000000
+set_option linter.unusedVariables false
+{declarations}
+def implementation {spec.binders} : {spec.result_type} :=
+  (
+{body}
+  )
+def cases : List ({case_type}) := [{", ".join(literals)}]
+def main : IO Unit := do
+  let mut admitted := 0
+  let mut failures := 0
+  let mut first := ""
+  for {binder} in cases do
+    if pre {args} then
+      admitted := admitted + 1
+      unless post (implementation {args}) {args} do
+        failures := failures + 1
+        if first.isEmpty then
+          first := s!"{reported} result={{implementation {args}}}"
+  IO.println s!"admitted={{admitted}} failures={{failures}}"
+  unless first.isEmpty do IO.println s!"counterexample {{first}}"
+"""
+
+
+async def run_sampled_test(
+    runtime: Runtime,
+    spec: Specification,
+    implementation: str,
+    inputs: Sequence[Mapping[str, Scalar]],
+    directory: Path,
+    timeout: float,
+) -> str:
+    """Run a filtered implementation, without a proof, and report the result to the model."""
+    try:
+        validate_candidate(
+            Candidate(implementation=implementation, proof="by trivial"), len(spec.parameters), spec.definition_names
+        )
+    except (CandidateError, ValueError) as error:
+        return f"REJECTED before running: {error}"
+    if not inputs:
+        return (
+            "INCONCLUSIVE: no sampled input satisfied the preconditions, so nothing ran. "
+            "Write the proof and call check_lean."
+        )
+    (directory / "Test.lean").write_text(sampled_test_source(spec, implementation, inputs))
+    tools = runtime.toolchain
+    try:
+        result = await run_command_async(
+            [str(tools.lean), "--run", "Test.lean"],
+            cwd=directory,
+            environment=tools.environment(directory),
+            timeout=timeout,
+            check=False,
+        )
+    except LeanTimeoutError:
+        return f"The implementation did not finish on the sampled inputs within {timeout:g} seconds."
+    except LeanError as exc:
+        raise CompilerError(str(exc)) from exc
+    if result.returncode:
+        return f"The implementation did not compile:\n{(result.stdout + result.stderr)[:1500]}"
+    report = re.search(r"admitted=(\d+) failures=(\d+)", result.stdout)
+    if report is None:
+        return f"The test printed no report:\n{result.stdout[:1500]}"
+    admitted, failures = int(report[1]), int(report[2])
+    if failures:
+        counterexample = re.search(r"^counterexample .*$", result.stdout, re.MULTILINE)
+        shown = counterexample[0] if counterexample else ""
+        return f"WRONG on {failures} of {admitted} sampled inputs. {shown}\nFix the implementation and test again."
+    return f"PASSED on {admitted} sampled inputs that satisfy the preconditions. Now write a proof and call check_lean."
 
 
 @dataclass(frozen=True)
