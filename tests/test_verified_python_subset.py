@@ -549,16 +549,16 @@ LOOP_PROOF = """by
   rw [key]; simp"""
 
 
-def _compiled(function, pre, post, implementation, proof, cache):
+def _compiled(function, pre, post, implementation, proof, cache, **options):
     from ai_functions.experimental.verified_compile import verified_ai_compile
     from ai_functions.experimental.verified_compile.compiler import Candidate
     from ai_functions.testing import ScriptedModel, Turn
 
     candidate = Candidate(implementation=implementation, proof=proof)
     llm = ScriptedModel([Turn(tool_calls=(("Candidate", candidate.model_dump()),))])
-    return verified_ai_compile(pre_conditions=pre, post_conditions=post, model=llm, cache_dir=cache, max_attempts=0)(
-        function
-    )
+    return verified_ai_compile(
+        pre_conditions=pre, post_conditions=post, model=llm, cache_dir=cache, max_attempts=0, **options
+    )(function)
 
 
 async def test_floor_division_runs_natively_like_python(tmp_path, native_runtime):
@@ -567,8 +567,14 @@ async def test_floor_division_runs_natively_like_python(tmp_path, native_runtime
     for a in (-7, 7, 0, 2**80, -(2**80)):
         for b in (-3, -2, 2, 3):
             assert await fn(a, b) == a // b
+    # Python raises here. The proof does not cover a zero divisor, and Lean's total
+    # division returns 0, so only the optional precondition check reports it.
+    assert fn.run_sync(1, 0) == 0
+    checked = _compiled(
+        floor_div, [nonzero_divisor], [is_floor_division], "Int.fdiv v0 v1", proof, tmp_path, check_pre_conditions=True
+    )
     with pytest.raises(ContractError, match="nonzero_divisor"):
-        fn.run_sync(1, 0)
+        checked.run_sync(1, 0)
 
 
 async def test_negative_indexing_runs_natively_like_python(tmp_path, native_runtime):
@@ -577,8 +583,13 @@ async def test_negative_indexing_runs_natively_like_python(tmp_path, native_runt
     for xs in ([1, 2, 3], [-(2**70), 5]):
         for i in range(-len(xs), len(xs)):
             assert await fn(xs, i) == xs[i]
+    # Python raises IndexError here; pythonAt returns its default, 0.
+    assert fn.run_sync([1, 2, 3], 3) == 0
+    checked = _compiled(
+        element, [index_in_range], [is_element], "pythonAt v0 v1", proof, tmp_path, check_pre_conditions=True
+    )
     with pytest.raises(ContractError, match="index_in_range"):
-        fn.run_sync([1, 2, 3], 3)
+        checked.run_sync([1, 2, 3], 3)
 
 
 async def test_helper_definitions_run_natively_like_python(tmp_path, native_runtime):

@@ -158,6 +158,8 @@ class _VerifiedFunction[**P, T]:
         cache_dir: str | Path | None = None,
         lean_config: LeanConfig | None = None,
         offline: bool = False,
+        check_pre_conditions: bool = False,
+        check_post_conditions: bool = False,
         output_type: type[T] | None = None,
     ) -> None:
         require_supported_python()
@@ -176,6 +178,8 @@ class _VerifiedFunction[**P, T]:
         )
         self._lean_config = lean_config or LeanConfig()
         self._offline = offline
+        self._check_pre = check_pre_conditions
+        self._check_post = check_post_conditions
         self._artifact: Artifact | None = None
         functools.update_wrapper(self, fn, updated=())
 
@@ -307,10 +311,19 @@ class _VerifiedFunction[**P, T]:
         return run_blocking(self.compile)
 
     async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
-        """Validate inputs, compile if needed, and call the verified native function."""
-        values = self._spec.bind(*args, **kwargs)
+        """Check argument types, compile if needed, and call the verified native function."""
+        values = self._values(*args, **kwargs)
         await self.compile()
         return await asyncio.to_thread(self._invoke, values)
+
+    def _values(self, *args: P.args, **kwargs: P.kwargs) -> dict[str, Scalar]:
+        # Types are always checked: the native bridge converts only the proved types.
+        # The proof covers every input satisfying the preconditions, so checking them
+        # at runtime only matters for callers that might pass inputs outside them.
+        values = self._spec.bind_types(*args, **kwargs)
+        if self._check_pre:
+            self._spec.check_pre_conditions(values)
+        return values
 
     def _invoke(self, values: dict[str, Scalar]) -> T:
         artifact = self._artifact
@@ -324,19 +337,21 @@ class _VerifiedFunction[**P, T]:
             error = CompilerError(f"Native execution failed for {self.name!r}.", function_name=self.name)
             error.diagnostics = str(exc)
             raise error from None
-        # This is an additional check of the trusted conversion boundary, not
-        # a substitute for the proof, and does not execute Python callbacks.
-        for condition in self._spec.post:
-            if not condition.predicate.evaluate({**values, "r": result}):
-                raise CompilerError(
-                    f"Compiled result failed contract {condition.name!r} ({condition.location}).",
-                    function_name=self.name,
-                )
+        if self._check_post:
+            # An additional check of the trusted native compiler, runtime, and
+            # conversion boundary, not a substitute for the proof. It evaluates the
+            # translated contracts and does not execute Python callbacks.
+            for condition in self._spec.post:
+                if not condition.predicate.evaluate({**values, "r": result}):
+                    raise CompilerError(
+                        f"Compiled result failed contract {condition.name!r} ({condition.location}).",
+                        function_name=self.name,
+                    )
         return typing.cast(T, result)
 
     def run_sync(self, *args: P.args, **kwargs: P.kwargs) -> T:
         """Call from synchronous Python, with no model calls after compilation."""
-        values = self._spec.bind(*args, **kwargs)
+        values = self._values(*args, **kwargs)
         if self._artifact is None:
             self.compile_sync()
         return self._invoke(values)
@@ -380,6 +395,8 @@ class _VerifiedFactory:
         cache_dir: str | Path | None = None,
         lean_config: LeanConfig | None = None,
         offline: bool = False,
+        check_pre_conditions: bool = False,
+        check_post_conditions: bool = False,
     ) -> Callable[[Callable[..., T]], _VerifiedFunction[..., T]]: ...
 
     def __call__(self, fn: Callable[..., Any] | None = None, /, **kwargs: Any) -> Any:
@@ -397,4 +414,8 @@ prepared on explicit or first-use compilation. Preconditions and
 postconditions use ordinary synchronous Python validator functions. The initial
 supported domain is pure ``int``/``bool``/``float``/``list[int]`` functions with explicit type hints.
 ``max_attempts`` is the number of retries after the initial synthesis attempt.
+Calls check argument types but, by default, do not evaluate the contracts.
+``check_pre_conditions=True`` rejects inputs outside the preconditions, which the
+proof does not cover. ``check_post_conditions=True`` re-checks each native result
+against the postconditions, guarding the trusted compiler, runtime, and conversion.
 """

@@ -718,6 +718,12 @@ class Specification:
     definitions: tuple[Definition, ...] = ()
 
     def bind(self, *args: object, **kwargs: object) -> dict[str, Scalar]:
+        """Bind defaults, reject values outside the proved input types, and check the preconditions."""
+        values = self.bind_types(*args, **kwargs)
+        self.check_pre_conditions(values)
+        return values
+
+    def bind_types(self, *args: object, **kwargs: object) -> dict[str, Scalar]:
         """Bind defaults and reject values outside the proved input types."""
         bound = self.signature.bind(*args, **kwargs)
         bound.apply_defaults()
@@ -733,13 +739,16 @@ class Specification:
                 if any(type(item) is not int for item in value):
                     raise TypeError(f"{self.name}(): {name!r} must contain only int values")
             values[f"v{index}"] = value
+        return values
+
+    def check_pre_conditions(self, values: Mapping[str, Scalar]) -> None:
+        """Reject inputs outside the preconditions, which the proof does not cover."""
         for contract in self.pre:
             if not contract.predicate.evaluate(values):
                 raise ContractError(
                     f"Precondition {contract.name!r} failed for {self.name!r} ({contract.location}).",
                     function_name=self.name,
                 )
-        return values
 
     def identity(self) -> str:
         """Return canonical compilation inputs for a content-addressed cache."""

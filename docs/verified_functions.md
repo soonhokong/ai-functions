@@ -215,12 +215,28 @@ an explicit compile call, the first valid function call performs compilation.
 artifact. Compilation proves one reusable function; it is not specialized to
 the first balance, fee, or limit.
 
-Preconditions are checked before every invocation. Invalid inputs do not
-initiate synthesis. Concurrent calls coordinate compilation through a file
-lock. Verified artifacts are reused across objects and Python processes using
-the same compatible runtime installation. Cache keys include the contracts,
-types, captured constants, guidance, compiler/translator version, platform,
-and runtime installation. Corrupted or incomplete entries are rebuilt.
+A call checks its argument types and runs the native code. By default it does
+not evaluate the contracts. The proof covers every input that satisfies the
+preconditions. An input that violates one still returns a value, because Lean
+functions are total, and the proof says nothing about that value. For example,
+a floor-division function implemented as `Int.fdiv v0 v1` returns 0 for a zero
+divisor, where Python would raise `ZeroDivisionError`.
+
+- `check_pre_conditions=True` evaluates the preconditions before every call.
+  Invalid inputs raise `ContractError` and do not initiate synthesis.
+- `check_post_conditions=True` evaluates the postconditions on every native
+  result, as a check on the trusted native compiler, runtime, and value
+  conversion for the inputs actually used. A failure raises `CompilerError`.
+
+Both checks run the translated contracts in a Python interpreter. For the loan
+example's $250,000, 360-period loan, the postcondition check takes about 26
+times as long as the native call.
+
+Concurrent calls coordinate compilation through a file lock. Verified artifacts
+are reused across objects and Python processes using the same compatible runtime
+installation. Cache keys include the contracts, types, captured constants,
+guidance, compiler/translator version, platform, and runtime installation.
+Corrupted or incomplete entries are rebuilt.
 
 ## Inspect generated artifacts
 
@@ -279,8 +295,9 @@ hatch run python examples/verified_payout.py --show-artifacts
   defined, which is stricter than Python stopping at the first false element. A
   loop whose raising operation depends on a branch over the loop's own
   variables requires that operation to be defined on every iteration. Stricter
-  is sound: a precondition rejects more inputs, and a postcondition asks the
-  proof for more.
+  is sound: a stricter precondition narrows the inputs the proof covers (and,
+  with `check_pre_conditions=True`, rejects more of them), and a stricter
+  postcondition asks the proof for more.
 - Stepped slices, `while`, arbitrary method calls, mutation, float `//` and `%`,
   float `sum` (CPython 3.12 sums floats with compensated summation), async
   validators, and AI validators are rejected.
@@ -311,7 +328,8 @@ def insertion_position(result: int, values: list[int], key: int):
 For integer lists, equality with `sorted(values)` translates to the equivalent
 pairwise ordering property. The returned position is specified independently of
 the search algorithm. Functional verification does not establish logarithmic
-complexity. List copying and runtime precondition validation also have a cost.
+complexity. List copying also has a cost, and so does runtime precondition
+validation with `check_pre_conditions=True`.
 
 ### Helpers, loops, and indexing
 
@@ -369,3 +387,6 @@ locks. `cache_dir` can select a different artifact cache, including for CI.
 Verification establishes the written contracts. Their deterministic translation
 and the native compiler/runtime are trusted implementation components. Keep the
 contracts strong enough to specify the behavior the application needs.
+`check_post_conditions=True` re-checks results against the same translation, so
+it guards the compiler, runtime, and value conversion, but not a mistranslation
+of the Python contract.

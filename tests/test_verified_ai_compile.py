@@ -145,6 +145,7 @@ async def test_quantified_lower_bound_matches_bisect(tmp_path, native_runtime):
         model=model(candidate),
         cache_dir=tmp_path,
         max_attempts=0,
+        check_pre_conditions=True,
     )(definitions["lower_bound"].__wrapped__)
     await fn.compile()
     for length in range(5):
@@ -167,6 +168,7 @@ async def test_maximum_payout_matches_exhaustive_fee_accounting(tmp_path, native
         model=model(candidate),
         cache_dir=tmp_path,
         max_attempts=0,
+        check_pre_conditions=True,
     )(definitions["max_payout"].__wrapped__)
     await fn.compile()
     for balance, fixed, rate, cap in product(range(41), (0, 1, 3, 10, 50), (0, 1, 290, 3333, 10000), (0, 1, 5, 20, 50)):
@@ -216,9 +218,23 @@ async def test_level_payment_matches_a_cent_by_cent_search(tmp_path, native_runt
     huge = 2**200
     payment = fn.run_sync(huge, 50, 12)
     assert balance_after(huge, 50, payment, 12) <= 0 < balance_after(huge, 50, payment - 1, 12)
+    # Outside loan_terms the proof says nothing, and by default nothing checks. At 200%
+    # interest per period no payment up to twice the principal clears the loan, so the
+    # search returns its upper bound, which leaves 1,000 cents owed.
+    assert fn.run_sync(1_000, 20_000, 12) == 2_000
+    assert balance_after(1_000, 20_000, 2_000, 12) == 1_000
+    checked = verified_ai_compile(
+        pre_conditions=[definitions["loan_terms"]],
+        post_conditions=[definitions["smallest_payment"]],
+        model=model(),
+        cache_dir=tmp_path,
+        check_pre_conditions=True,
+    )(definitions["level_payment"].__wrapped__)
     for invalid in ((-1, 0, 1), (1, -1, 1), (1, 10001, 1), (1, 0, 0), (1, 0, 1201)):
         with pytest.raises(ContractError, match="loan_terms"):
-            fn.run_sync(*invalid)
+            checked.run_sync(*invalid)
+    # The options are not part of the cache key, so the checked function reuses the artifact.
+    assert checked.run_sync(25_000_000, 50, 360) == 149_888
 
 
 async def test_cached_artifact_works_in_a_fresh_python_process(tmp_path, native_runtime):
@@ -268,12 +284,34 @@ async def test_precondition_and_type_errors_do_not_start_synthesis(tmp_path, mon
         pytest.fail("Invalid input reached compiler setup")
 
     monkeypatch.setattr("ai_functions.experimental.verified_compile.function.resolve_runtime", must_not_resolve_runtime)
-    fn = decorate(tmp_path, model(), max_attempts=0)
+    fn = decorate(tmp_path, model(), max_attempts=0, check_pre_conditions=True)
     with pytest.raises(ContractError, match="valid_bounds"):
         await fn(1, 10, -10)
-    with pytest.raises(TypeError, match="must be int"):
-        fn.run_sync(True)
+    # Argument types are checked whether or not the contracts are.
+    for typed in (fn, decorate(tmp_path, model(), max_attempts=0)):
+        with pytest.raises(TypeError, match="must be int"):
+            typed.run_sync(True)
     assert not fn.is_compiled
+
+
+async def test_runtime_contract_checks_are_opt_in(tmp_path, monkeypatch):
+    # A stand-in for a wrong native result, as a bug in the trusted compiler,
+    # runtime, or value conversion could produce. The proof excludes it only when
+    # those components are correct; the optional check catches it on the inputs used.
+    class WrongArtifact:
+        def invoke(self, spec, values):
+            return 99
+
+    unchecked = decorate(tmp_path, model(), max_attempts=0)
+    checked = decorate(tmp_path, model(), max_attempts=0, check_pre_conditions=True, check_post_conditions=True)
+    for fn in (unchecked, checked):
+        monkeypatch.setattr(fn, "_artifact", WrongArtifact())
+    assert unchecked.run_sync(1, 10, -10) == 99
+    assert await unchecked(5) == 99
+    with pytest.raises(ContractError, match="valid_bounds"):
+        checked.run_sync(1, 10, -10)
+    with pytest.raises(CompilerError, match="failed contract 'check_clamp'"):
+        await checked(5)
 
 
 async def test_missing_toolchain_fails_before_model_calls(tmp_path, monkeypatch):

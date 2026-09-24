@@ -71,8 +71,11 @@ def test_binding_preserves_names_defaults_and_preconditions():
     assert spec.bind(x=20) == {"v0": 20, "v1": -10, "v2": 10}
     with pytest.raises(ContractError, match="Precondition '_bounds' failed"):
         spec.bind(2, 10, -10)
+    assert spec.bind_types(2, 10, -10) == {"v0": 2, "v1": 10, "v2": -10}
     with pytest.raises(TypeError, match="must be int"):
         spec.bind(True)
+    with pytest.raises(TypeError, match="must be int"):
+        spec.bind_types(True)
     with pytest.raises(TypeError):
         spec.bind()
 
