@@ -191,6 +191,36 @@ async def test_maximum_payout_matches_exhaustive_fee_accounting(tmp_path, native
             fn.run_sync(*invalid)
 
 
+async def test_level_payment_matches_a_cent_by_cent_search(tmp_path, native_runtime):
+    # Captured from a real Opus 5.5 synthesis. The implementation never calls
+    # balance_after: it bisects over a Nat simulation that stops once the loan is
+    # paid off, and the proof relates that simulation to the contract's loop.
+    root = Path(__file__).resolve().parents[1]
+    definitions = runpy.run_path(str(root / "examples" / "verified_loan_payment.py"), run_name="loan_tests")
+    candidate = Candidate.model_validate_json((root / "tests" / "fixtures" / "verified_loan_payment.json").read_text())
+    assert "balance_after" not in candidate.implementation
+    fn = verified_ai_compile(
+        pre_conditions=[definitions["loan_terms"]],
+        post_conditions=[definitions["smallest_payment"]],
+        model=model(candidate),
+        cache_dir=tmp_path,
+        max_attempts=0,
+    )(definitions["level_payment"].__wrapped__)
+    await fn.compile()
+    balance_after = definitions["balance_after"]
+    for principal, rate, periods in product(range(0, 60, 7), (0, 1, 50, 5000, 10000), (1, 2, 3, 12)):
+        # The oracle scans one cent at a time, so it does not share the bisection.
+        expected = next(p for p in range(2 * principal + 1) if balance_after(principal, rate, p, periods) <= 0)
+        assert fn.run_sync(principal, rate, periods) == expected
+    assert fn.run_sync(25_000_000, 50, 360) == 149_888
+    huge = 2**200
+    payment = fn.run_sync(huge, 50, 12)
+    assert balance_after(huge, 50, payment, 12) <= 0 < balance_after(huge, 50, payment - 1, 12)
+    for invalid in ((-1, 0, 1), (1, -1, 1), (1, 10001, 1), (1, 0, 0), (1, 0, 1201)):
+        with pytest.raises(ContractError, match="loan_terms"):
+            fn.run_sync(*invalid)
+
+
 async def test_cached_artifact_works_in_a_fresh_python_process(tmp_path, native_runtime):
     fn = decorate(tmp_path, model(GOOD), max_attempts=0)
     await fn.compile()

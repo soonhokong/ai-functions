@@ -313,6 +313,28 @@ pairwise ordering property. The returned position is specified independently of
 the search algorithm. Functional verification does not establish logarithmic
 complexity. List copying and runtime precondition validation also have a cost.
 
+### Helpers, loops, and indexing
+
+These examples state a property and leave the algorithm to synthesis:
+
+| Example | Contract uses | What the proof connects |
+| --- | --- | --- |
+| [Banker's rounding](../examples/verified_round_half_even.py) | `abs`, `%`, no division | a tie rule stated in integers, and a floor-division implementation |
+| [Installment splits](../examples/verified_installments.py) | `sum`, `max`, `min`, indexing, `range()`, a list result | four properties of the split, and the unique split they allow |
+| [First overdraft](../examples/verified_first_overdraft.py) | a helper, slices, `sum`, `range()` | a quadratic prefix-sum statement, and a single pass |
+| [Luhn check digit](../examples/verified_luhn_check_digit.py) | two helpers, `enumerate()`, `reversed()`, `%` | "appending it makes the number valid", and a direct computation |
+| [Best single trade](../examples/verified_best_trade.py) | nested quantifiers over `range()`, indexing | a comparison of every pair of days, and a single pass |
+| [Fee helper](../examples/verified_fee_helpers.py) | a helper, `//` | the payout policy as its own driver computes fees |
+| [First maximum](../examples/verified_first_maximum.py) | indexing, `range()`, quantifiers | where the answer is, and how to find it |
+| [Level loan payment](../examples/verified_loan_payment.py) | a helper containing a loop, `//` | "one cent less would not clear the loan", and a bisection over a `Nat` simulation that stops once the loan is paid off |
+
+A synthesized implementation can be less efficient than the one a docstring
+suggests; the proof covers the result, not the running time. State a performance
+requirement in the docstring as a requirement, as the loan example does. Lean
+keeps `Nat` values below 2^63 unboxed but `Int` values only within 32 bits, so an
+implementation that computes with `Nat` avoids big-integer arithmetic for values
+such as cents times basis points.
+
 ### Floating-point behavior
 
 Python `float` maps to native IEEE-754 binary64 with a corresponding logical
